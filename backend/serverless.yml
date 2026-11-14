@@ -1,0 +1,298 @@
+service: gaitvision-backend
+
+frameworkVersion: '4'
+
+stages:
+  default:
+    params:
+      userPoolId: ${env:COGNITO_USER_POOL_ID, 'us-east-1_fLyGM6BsL'}
+      clientId: ${env:COGNITO_CLIENT_ID, '3n9otsnh6lpt92g0ipcvp19oqu'}
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-1'}
+  memorySize: 512
+  timeout: 30
+  environment:
+    STAGE: ${sls:stage}
+    REGION: ${aws:region}
+    USER_POOL_ID: ${param:userPoolId}
+    CLIENT_ID: ${param:clientId}
+    MAIN_TABLE: gaitvision-main-${sls:stage}
+    STORAGE_BUCKET: gaitvision-storage-${sls:stage}
+    JOBS_QUEUE_URL: { Ref: AnalysisJobsQueue }
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+            - dynamodb:BatchWriteItem
+          Resource:
+            - "arn:aws:dynamodb:${aws:region}:*:table/gaitvision-*"
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:DeleteObject
+          Resource:
+            - "arn:aws:s3:::gaitvision-*/*"
+        - Effect: Allow
+          Action:
+            - sqs:SendMessage
+            - sqs:ReceiveMessage
+            - sqs:DeleteMessage
+            - sqs:GetQueueAttributes
+          Resource:
+            - { Fn::GetAtt: [AnalysisJobsQueue, Arn] }
+
+functions:
+  # Dashboard APIs
+  getDashboardOverview:
+    handler: src/handlers/dashboard.getOverview
+    events:
+      - http:
+          path: /dashboard/overview
+          method: get
+          cors: true
+
+  getDashboardActivity:
+    handler: src/handlers/dashboard.getActivity
+    events:
+      - http:
+          path: /dashboard/activity
+          method: get
+          cors: true
+
+  # Videos Management & S3 Presigned Uploads
+  getVideoUploadUrl:
+    handler: src/handlers/videos.getUploadUrl
+    events:
+      - http:
+          path: /videos/upload-url
+          method: post
+          cors: true
+
+  completeVideoUpload:
+    handler: src/handlers/videos.completeUpload
+    events:
+      - http:
+          path: /videos/complete-upload
+          method: post
+          cors: true
+
+  listVideos:
+    handler: src/handlers/videos.listVideos
+    events:
+      - http:
+          path: /videos
+          method: get
+          cors: true
+
+  getVideoById:
+    handler: src/handlers/videos.getVideoById
+    events:
+      - http:
+          path: /videos/{videoId}
+          method: get
+          cors: true
+
+  # Analysis Jobs & SQS Dispatch
+  createAnalysisJob:
+    handler: src/handlers/analysis.createJob
+    events:
+      - http:
+          path: /analysis
+          method: post
+          cors: true
+
+  listAnalysisJobs:
+    handler: src/handlers/analysis.listJobs
+    events:
+      - http:
+          path: /analysis
+          method: get
+          cors: true
+
+  getAnalysisJob:
+    handler: src/handlers/analysis.getJob
+    events:
+      - http:
+          path: /analysis/{analysisId}
+          method: get
+          cors: true
+
+  getAnalysisResults:
+    handler: src/handlers/analysis.getResults
+    events:
+      - http:
+          path: /analysis/{analysisId}/results
+          method: get
+          cors: true
+
+  # Gait Profiles Gallery & Enrollment
+  listProfiles:
+    handler: src/handlers/profiles.listProfiles
+    events:
+      - http:
+          path: /profiles
+          method: get
+          cors: true
+
+  createProfile:
+    handler: src/handlers/profiles.createProfile
+    events:
+      - http:
+          path: /profiles
+          method: post
+          cors: true
+
+  getProfileById:
+    handler: src/handlers/profiles.getProfileById
+    events:
+      - http:
+          path: /profiles/{profileId}
+          method: get
+          cors: true
+
+  # Event Investigation & Reviews
+  listEvents:
+    handler: src/handlers/events.listEvents
+    events:
+      - http:
+          path: /events
+          method: get
+          cors: true
+
+  getEventById:
+    handler: src/handlers/events.getEventById
+    events:
+      - http:
+          path: /events/{eventId}
+          method: get
+          cors: true
+
+  reviewEvent:
+    handler: src/handlers/events.reviewEvent
+    events:
+      - http:
+          path: /events/{eventId}/review
+          method: patch
+          cors: true
+
+  # Model Registry & Evaluation Pipeline
+  listModels:
+    handler: src/handlers/models.listModels
+    events:
+      - http:
+          path: /models
+          method: get
+          cors: true
+
+  getModelById:
+    handler: src/handlers/models.getModelById
+    events:
+      - http:
+          path: /models/{modelId}
+          method: get
+          cors: true
+
+  createEvaluation:
+    handler: src/handlers/models.createEvaluation
+    events:
+      - http:
+          path: /models/evaluations
+          method: post
+          cors: true
+
+  listEvaluations:
+    handler: src/handlers/models.listEvaluations
+    events:
+      - http:
+          path: /models/evaluations
+          method: get
+          cors: true
+
+  getEvaluationById:
+    handler: src/handlers/models.getEvaluationById
+    events:
+      - http:
+          path: /models/evaluations/{evaluationId}
+          method: get
+          cors: true
+
+  compareModels:
+    handler: src/handlers/models.compareModels
+    events:
+      - http:
+          path: /models/comparison
+          method: get
+          cors: true
+
+resources:
+  Resources:
+    # Single-Table DynamoDB Architecture
+    MainTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: gaitvision-main-${sls:stage}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: PK
+            AttributeType: S
+          - AttributeName: SK
+            AttributeType: S
+          - AttributeName: GSI1PK
+            AttributeType: S
+          - AttributeName: GSI1SK
+            AttributeType: S
+        KeySchema:
+          - AttributeName: PK
+            KeyType: HASH
+          - AttributeName: SK
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: GSI1
+            KeySchema:
+              - AttributeName: GSI1PK
+                KeyType: HASH
+              - AttributeName: GSI1SK
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+
+    # Storage Bucket
+    StorageBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: gaitvision-storage-${sls:stage}
+        CorsConfiguration:
+          CorsRules:
+            - AllowedHeaders: ['*']
+              AllowedMethods: [GET, PUT, POST, DELETE, HEAD]
+              AllowedOrigins: ['*']
+              MaxAge: 3600
+
+    # Dead Letter Queue (DLQ)
+    AnalysisJobsDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: gaitvision-jobs-dlq-${sls:stage}
+        MessageRetentionPeriod: 1209600
+
+    # Primary SQS Jobs Queue
+    AnalysisJobsQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: gaitvision-jobs-queue-${sls:stage}
+        VisibilityTimeout: 180
+        RedrivePolicy:
+          deadLetterTargetArn: { Fn::GetAtt: [AnalysisJobsDLQ, Arn] }
+          maxReceiveCount: 3
