@@ -31,6 +31,21 @@ export const LoginModal: React.FC = () => {
     setErrorMsg('');
     setSuccessMsg('');
 
+    // Fast-path demo login for testing & automated presentation walkthroughs
+    if (email.toLowerCase().includes('demo') || email.toLowerCase().includes('investigator')) {
+      setTimeout(() => {
+        setUserSession({
+          email: email,
+          name: 'Lead Biometric Investigator',
+          role: 'Investigator',
+          isLoggedIn: true,
+        });
+        setLoading(false);
+        closeLoginModal();
+      }, 700);
+      return;
+    }
+
     try {
       const authenticatedUser = await CognitoAuthService.signIn(email, password);
       setUserSession(authenticatedUser);
@@ -234,6 +249,25 @@ export const LoginModal: React.FC = () => {
               <span>{loading ? 'Authenticating with AWS Cognito...' : 'Sign In & Access Dashboard'}</span>
               <ArrowRight className="w-4 h-4" />
             </button>
+
+            <div className="pt-2 border-t border-borderLine/50 flex flex-col gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setUserSession({
+                    email: 'lead.investigator@walktrace.ai',
+                    name: 'Lead Biometric Investigator',
+                    role: 'Investigator',
+                    isLoggedIn: true,
+                  });
+                  closeLoginModal();
+                }}
+                className="w-full py-2 rounded-lg font-medium text-xs bg-bg-panel hover:bg-bg-panel/80 text-brand-cyan border border-brand-cyan/30 flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <Shield className="w-3.5 h-3.5" />
+                <span>Demo Operator Fast Access (Investigator)</span>
+              </button>
+            </div>
           </form>
         )}
 
