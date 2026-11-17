@@ -252,20 +252,22 @@ export const DashboardPage: React.FC = () => {
               setAnalysisResultData(res.data);
               setUploadStatus('completed');
               setUploadProgressMsg('Gait analysis complete. Biometric identification finished.');
+              return;
             } else if (res.data.status === 'FAILED') {
               clearInterval(pollInterval);
               setUploadStatus('error');
               setUploadProgressMsg(res.data.error || 'AI analysis failed on footage.');
+              return;
             }
           }
         } catch {
           // Continue polling until terminal status or timeout
         }
 
-        if (attempts > 60) {
+        if (attempts > 180) {
           clearInterval(pollInterval);
           setUploadStatus('error');
-          setUploadProgressMsg('Analysis timed out. Inference worker is taking longer than expected.');
+          setUploadProgressMsg('Analysis polling paused. If worker just finished, click "Fetch Results" below.');
         }
       }, 2000);
 
@@ -278,6 +280,29 @@ export const DashboardPage: React.FC = () => {
         setUploadStatus('error');
         setUploadProgressMsg(err.message || 'Operation failed. Please check network connection or permissions.');
       }
+    }
+  };
+
+  const handleRefreshResults = async () => {
+    if (!activeAnalysisId) return;
+    try {
+      setUploadProgressMsg(`Querying live DynamoDB results for job ${activeAnalysisId}...`);
+      const res = await WalkTraceApi.getAnalysisResults(activeAnalysisId);
+      if (res.success && res.data) {
+        if (res.data.status === 'COMPLETED') {
+          setAnalysisResultData(res.data);
+          setUploadStatus('completed');
+          setUploadProgressMsg('Gait analysis complete. Biometric identification finished.');
+        } else if (res.data.status === 'FAILED') {
+          setUploadStatus('error');
+          setUploadProgressMsg(res.data.error || 'AI analysis failed on footage.');
+        } else {
+          setUploadStatus('processing');
+          setUploadProgressMsg('AI Worker still processing video in SQS...');
+        }
+      }
+    } catch (err: any) {
+      alert(`Could not fetch results: ${err.message}`);
     }
   };
 
@@ -817,13 +842,24 @@ export const DashboardPage: React.FC = () => {
                         )}
 
                         {uploadStatus === 'error' && (
-                          <button
-                            onClick={handleStartUploadAndAnalysis}
-                            className="w-full py-2.5 px-4 rounded-xl text-xs font-bold bg-red-500/20 border border-red-500/40 text-red-300 hover:bg-red-500/30 flex items-center justify-center gap-2 transition-colors"
-                          >
-                            <RefreshCw className="w-4 h-4" />
-                            <span>Retry Analysis</span>
-                          </button>
+                          <div className="flex flex-col sm:flex-row items-center gap-2 w-full">
+                            {activeAnalysisId && (
+                              <button
+                                onClick={handleRefreshResults}
+                                className="flex-1 py-2.5 px-4 rounded-xl text-xs font-bold bg-brand-cyan/20 border border-brand-cyan/40 text-brand-cyan hover:bg-brand-cyan/30 flex items-center justify-center gap-2 transition-colors w-full"
+                              >
+                                <CheckCircle2 className="w-4 h-4" />
+                                <span>Fetch Results (ID: {activeAnalysisId})</span>
+                              </button>
+                            )}
+                            <button
+                              onClick={handleStartUploadAndAnalysis}
+                              className="py-2.5 px-4 rounded-xl text-xs font-bold bg-red-500/20 border border-red-500/40 text-red-300 hover:bg-red-500/30 flex items-center justify-center gap-2 transition-colors w-full sm:w-auto"
+                            >
+                              <RefreshCw className="w-4 h-4" />
+                              <span>Re-upload & Retry</span>
+                            </button>
+                          </div>
                         )}
                       </div>
                     </div>
