@@ -270,8 +270,8 @@ def process_single_analysis_job(job_msg: dict, preprocessor: SilhouettePreproces
         print(f"[Worker] Extracted {len(silhouettes)} silhouettes. Inference Time: {inference_time*1000:.1f}ms.", flush=True)
         print(f"[Worker] Probe vector norm: {np.linalg.norm(probe_embedding):.4f} (256-D).", flush=True)
 
-        # Step 4: Save & Upload Silhouette Preview Strip to S3
-        preprocessor.save_silhouette_preview_strip(silhouettes, local_preview_path, num_samples=6)
+        # Step 4: Save & Upload Silhouette Preview Strip to S3 (All extracted frames)
+        preprocessor.save_silhouette_preview_strip(silhouettes, local_preview_path, num_samples=None)
         silhouette_s3_key = f"silhouettes/{analysis_id}/preview_strip.png"
         
         print(f"[Worker] Uploading preview strip to s3://{s3_bucket}/{silhouette_s3_key}...", flush=True)
@@ -432,5 +432,11 @@ def run_worker_cycle(max_messages=5):
     return processed_count
 
 if __name__ == '__main__':
-    print("[AI Worker] Initializing WalkTrace AI Inference Worker Service...")
-    run_worker_cycle()
+    print("[AI Worker] Starting WalkTrace AI Inference Worker in continuous listening mode (SQS)...", flush=True)
+    print("[AI Worker] Polling for video analysis jobs. Press Ctrl+C to terminate.", flush=True)
+    try:
+        while True:
+            run_worker_cycle()
+            time.sleep(2)
+    except KeyboardInterrupt:
+        print("\n[AI Worker] Worker stopped by operator.", flush=True)

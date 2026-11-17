@@ -43,8 +43,8 @@ def test_video(video_path: str, model_name: str = 'GaitBase-v1', save_preview: s
     silhouettes = preprocessor.extract_silhouettes(frames)
     print(f"    - Normalized {len(silhouettes)} silhouette frames to (64, 64) centered canvas.")
     
-    preprocessor.save_silhouette_preview_strip(silhouettes, save_preview, num_samples=6)
-    print(f"    - Saved visual 6-frame preview strip to: {os.path.abspath(save_preview)}")
+    preprocessor.save_silhouette_preview_strip(silhouettes, save_preview, num_samples=None)
+    print(f"    - Saved visual {len(silhouettes)}-frame preview strip to: {os.path.abspath(save_preview)}")
 
     # 3. Model Inference
     print(f"\n[Stage 3/4] Executing PyTorch neural forward pass ({model_name})...")

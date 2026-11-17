@@ -882,16 +882,16 @@ export const DashboardPage: React.FC = () => {
 
                   {analysisResultData?.silhouettesPreviewUrl ? (
                     <div className="space-y-2">
-                      <div className="p-3 rounded-xl bg-black border border-borderLine overflow-x-auto flex justify-center">
+                      <div className="p-3 rounded-xl bg-black border border-borderLine overflow-x-auto flex items-center justify-start scrollbar-thin">
                         <img 
                           src={analysisResultData.silhouettesPreviewUrl} 
                           alt="Extracted Silhouettes Preview Strip" 
-                          className="max-h-20 object-contain rounded"
+                          className="h-20 max-w-none rounded shadow-inner"
                         />
                       </div>
                       <div className="flex items-center justify-between text-[10px] font-mono text-muted">
                         <span>Source: s3://gaitvision-storage-dev/{analysisResultData.silhouettesS3Key}</span>
-                        <span className="text-brand-cyan">Aspect Preserved · 64×64</span>
+                        <span className="text-brand-cyan">All {analysisResultData?.silhouettesExtracted || ''} frames · Scroll horizontally →</span>
                       </div>
                     </div>
                   ) : (

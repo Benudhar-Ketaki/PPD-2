@@ -200,18 +200,24 @@ class SilhouettePreprocessor:
 
         return np.stack(sequence, axis=0)
 
-    def save_silhouette_preview_strip(self, sequence: np.ndarray, output_path: str, num_samples=6):
+    def save_silhouette_preview_strip(self, sequence: np.ndarray, output_path: str, num_samples=None):
         """
         Saves a high-contrast multi-frame silhouette sprite strip for UI visualization.
+        If num_samples is None or <= 0, renders ALL frames in the sequence with frame numbering.
         """
         total_frames = len(sequence)
-        indices = np.linspace(0, total_frames - 1, num_samples, dtype=int)
+        if num_samples is None or num_samples <= 0 or num_samples >= total_frames:
+            indices = list(range(total_frames))
+        else:
+            indices = np.linspace(0, total_frames - 1, num_samples, dtype=int)
         
         sample_frames = []
         for idx in indices:
             frame_img = (sequence[idx] * 255.0).astype(np.uint8)
-            # Add a 1px border around each frame
-            bordered = cv2.copyMakeBorder(frame_img, 2, 2, 2, 2, cv2.BORDER_CONSTANT, value=60)
+            # Add a 2px border around each frame
+            bordered = cv2.copyMakeBorder(frame_img, 2, 2, 2, 2, cv2.BORDER_CONSTANT, value=50)
+            # Draw frame index number at top left
+            cv2.putText(bordered, f"{idx+1}", (3, 11), cv2.FONT_HERSHEY_SIMPLEX, 0.28, 175, 1)
             sample_frames.append(bordered)
 
         strip = np.hstack(sample_frames)
