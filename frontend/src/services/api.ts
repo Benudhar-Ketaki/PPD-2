@@ -79,19 +79,38 @@ export interface AnalysisJob {
   createdAt: string;
 }
 
+export interface CandidateMatch {
+  rank: number;
+  profileId: string;
+  displayName: string;
+  category?: string;
+  gaitCondition: string;
+  distance: string | number;
+  similarityScore: string | number;
+  reviewStatus?: string;
+}
+
 export interface AnalysisResult {
   analysisId: string;
   videoId: string;
   status: string;
-  candidateMatches: Array<{
-    rank: number;
-    profileId: string;
-    similarityScore: number;
-    distance: number;
-    gaitCondition: string;
-  }>;
-  silhouettesSequenceUrl?: string;
-  trackId: string;
+  modelId?: string;
+  modelVersion?: string;
+  matchState?: 'MATCH_FOUND' | 'NO_MATCH';
+  candidateMatches: CandidateMatch[];
+  silhouettesExtracted?: number;
+  silhouettesS3Key?: string;
+  silhouettesPreviewUrl?: string;
+  inputResolution?: string;
+  fps?: string;
+  videoDuration?: string;
+  inferenceTimeMs?: string;
+  embeddingDimension?: number;
+  distanceMetric?: string;
+  trackId?: string;
+  completedAt?: string;
+  error?: string;
+  disclaimer?: string;
 }
 
 export const WalkTraceApi = {
@@ -112,10 +131,53 @@ export const WalkTraceApi = {
     });
   },
 
-  async completeVideoUpload(videoId: string, s3Key: string, fileName: string, fileSize?: number): Promise<{ success: boolean; data: any }> {
+  async uploadVideoToS3WithProgress(
+    uploadUrl: string,
+    file: File,
+    onProgress: (percent: number) => void,
+    abortSignalRef?: { abort?: () => void }
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      if (abortSignalRef) {
+        abortSignalRef.abort = () => xhr.abort();
+      }
+
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const percent = Math.round((event.loaded / event.total) * 100);
+          onProgress(percent);
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve();
+        } else {
+          reject(new Error(`S3 direct upload failed with status ${xhr.status}`));
+        }
+      };
+
+      xhr.onerror = () => reject(new Error('Network error occurred during direct S3 video upload'));
+      xhr.onabort = () => reject(new Error('Upload canceled by user'));
+
+      xhr.open('PUT', uploadUrl, true);
+      xhr.setRequestHeader('Content-Type', file.type || 'video/mp4');
+      xhr.send(file);
+    });
+  },
+
+  async completeVideoUpload(
+    videoId: string, 
+    s3Key: string, 
+    fileName: string, 
+    fileSize?: number, 
+    duration?: number, 
+    resolution?: string
+  ): Promise<{ success: boolean; data: any }> {
     return request('/videos/complete-upload', {
       method: 'POST',
-      body: JSON.stringify({ videoId, s3Key, fileName, fileSize }),
+      body: JSON.stringify({ videoId, s3Key, fileName, fileSize, duration, resolution }),
     });
   },
 

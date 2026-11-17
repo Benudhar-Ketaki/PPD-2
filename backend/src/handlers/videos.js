@@ -1,11 +1,11 @@
 const { v4: uuidv4 } = require('uuid');
 const { success, error } = require('../utils/response');
-const { db, generatePresignedUploadUrl } = require('../services/aws');
+const { db, generatePresignedUploadUrl, checkObjectExists, bucketName } = require('../services/aws');
 const { authenticate, authorize } = require('../middleware/auth');
 
 exports.getUploadUrl = async (event) => {
   const user = await authenticate(event);
-  if (!authorize(user, ['Administrator', 'Investigator'])) {
+  if (!authorize(user, ['Administrator', 'Investigator', 'Analyst'])) {
     return error('Forbidden: Role insufficient to upload footage.', 403);
   }
 
@@ -17,7 +17,7 @@ exports.getUploadUrl = async (event) => {
   }
 
   const fileName = body.fileName || 'surveillance_video.mp4';
-  const contentType = body.contentType || 'video/mp4';
+  const contentType = body.contentType || body.fileType || 'video/mp4';
   const videoId = `vid-${uuidv4().slice(0, 8)}`;
   const s3Key = `raw-videos/${user.userId}/${videoId}_${fileName}`;
 
@@ -28,12 +28,16 @@ exports.getUploadUrl = async (event) => {
     s3Key,
     uploadUrl,
     expiresIn: 3600,
-    bucket: process.env.STORAGE_BUCKET || 'gaitvision-storage-dev',
+    bucket: bucketName,
   });
 };
 
 exports.completeUpload = async (event) => {
   const user = await authenticate(event);
+  if (!authorize(user, ['Administrator', 'Investigator', 'Analyst'])) {
+    return error('Forbidden: Role insufficient to register footage.', 403);
+  }
+
   let body = {};
   try {
     body = JSON.parse(event.body || '{}');
@@ -41,9 +45,24 @@ exports.completeUpload = async (event) => {
     return error('Invalid JSON payload');
   }
 
-  const { videoId, s3Key, fileName, fileSize, duration, cameraId } = body;
+  const { videoId, s3Key, fileName, fileSize, contentType, duration, resolution, cameraId } = body;
   if (!videoId || !s3Key) {
     return error('Missing required fields: videoId, s3Key');
+  }
+
+  // Idempotency: Return existing record if already verified as READY
+  const existingVideo = await db.get(`VIDEO#${videoId}`, 'METADATA');
+  if (existingVideo && (existingVideo.uploadStatus === 'READY' || existingVideo.uploadStatus === 'COMPLETED')) {
+    return success({
+      message: 'Video upload already verified (idempotent)',
+      video: existingVideo,
+    }, 200);
+  }
+
+  // Verify object existence in S3 using HeadObject
+  const headRes = await checkObjectExists(s3Key);
+  if (!headRes.exists) {
+    return error(`Uploaded video object not found in S3 bucket (${bucketName}/${s3Key}). Verification failed.`, 400);
   }
 
   const now = new Date().toISOString();
@@ -55,17 +74,21 @@ exports.completeUpload = async (event) => {
     videoId,
     userId: user.userId,
     userEmail: user.email,
+    s3Bucket: bucketName,
     s3Key,
     fileName: fileName || 'video.mp4',
-    fileSize: fileSize || 0,
-    duration: duration || 15.0,
+    fileSize: headRes.contentLength || fileSize || 0,
+    contentType: headRes.contentType || contentType || 'video/mp4',
+    duration: duration || null,
+    resolution: resolution || null,
     cameraId: cameraId || 'CAM-01',
-    uploadStatus: 'COMPLETED',
-    createdAt: now,
+    uploadStatus: 'READY',
+    createdAt: existingVideo?.createdAt || now,
+    verifiedAt: now,
   };
 
   await db.put(videoItem);
-  return success({ message: 'Video upload confirmed', video: videoItem }, 201);
+  return success({ message: 'Video upload confirmed and verified READY', video: videoItem }, 201);
 };
 
 exports.listVideos = async (event) => {

@@ -7,7 +7,7 @@ const {
   UpdateCommand, 
   DeleteCommand 
 } = require('@aws-sdk/lib-dynamodb');
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, HeadObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { SQSClient, SendMessageCommand } = require('@aws-sdk/client-sqs');
 
@@ -120,6 +120,27 @@ async function generatePresignedUploadUrl(s3Key, contentType = 'video/mp4', expi
   }
 }
 
+async function checkObjectExists(s3Key) {
+  try {
+    const res = await s3Client.send(new HeadObjectCommand({
+      Bucket: bucketName,
+      Key: s3Key,
+    }));
+    return {
+      exists: true,
+      contentLength: res.ContentLength,
+      contentType: res.ContentType,
+      lastModified: res.LastModified,
+    };
+  } catch (err) {
+    if (err.name === 'NotFound' || err.$metadata?.httpStatusCode === 404) {
+      return { exists: false };
+    }
+    console.warn(`[S3 HeadObject] ${s3Key}:`, err.message);
+    return { exists: false, error: err.message };
+  }
+}
+
 async function enqueueJob(jobPayload) {
   try {
     if (queueUrl) {
@@ -138,7 +159,9 @@ async function enqueueJob(jobPayload) {
 module.exports = {
   db,
   generatePresignedUploadUrl,
+  checkObjectExists,
   enqueueJob,
   bucketName,
   tableName,
+  s3Client,
 };

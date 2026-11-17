@@ -16,14 +16,26 @@ import {
   Loader2,
   Database,
   ShieldCheck,
-  Server
+  Server,
+  Play,
+  X,
+  RefreshCw,
+  FileVideo,
+  Cpu,
+  Layers,
+  Sparkles,
+  Clock,
+  Crosshair,
+  Sliders,
+  Check,
+  ExternalLink
 } from 'lucide-react';
 import { 
   SAMPLE_CAMERAS, 
   SAMPLE_PROFILES
 } from '../data/mockData';
 import { DashboardTab, PersonProfile } from '../types';
-import { WalkTraceApi, DashboardOverview } from '../services/api';
+import { WalkTraceApi, DashboardOverview, AnalysisResult, CandidateMatch } from '../services/api';
 
 export const DashboardPage: React.FC = () => {
   const { activeTab, setActiveTab, user } = useApp();
@@ -44,10 +56,18 @@ export const DashboardPage: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   
   // Real S3 video upload & analysis state
+  const [dragActive, setDragActive] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [videoPreviewUrl, setVideoPreviewUrl] = useState<string | null>(null);
+  const [videoDuration, setVideoDuration] = useState<number | null>(null);
+  const [videoResolution, setVideoResolution] = useState<string | null>(null);
+  const [selectedModel, setSelectedModel] = useState<'GaitBase-v1' | 'GaitGL-ET'>('GaitBase-v1');
   const [uploadStatus, setUploadStatus] = useState<'idle' | 'requesting_url' | 'uploading_s3' | 'queuing_analysis' | 'processing' | 'completed' | 'error'>('idle');
+  const [uploadProgressPercent, setUploadProgressPercent] = useState<number>(0);
   const [uploadProgressMsg, setUploadProgressMsg] = useState('');
-  const [uploadedFileName, setUploadedFileName] = useState('');
-  const [analysisResults, setAnalysisResults] = useState<any[] | null>(null);
+  const [activeAnalysisId, setActiveAnalysisId] = useState<string | null>(null);
+  const [analysisResultData, setAnalysisResultData] = useState<AnalysisResult | null>(null);
+  const abortUploadRef = useRef<{ abort?: () => void }>({});
 
   // New subject enrollment modal/form state
   const [isEnrollModalOpen, setIsEnrollModalOpen] = useState(false);
@@ -93,69 +113,171 @@ export const DashboardPage: React.FC = () => {
     };
   }, [activeTab]);
 
-  // Video Upload & AI Pipeline Execution
-  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Video File Selection & Validation
+  const processSelectedFile = (file: File) => {
+    const validExtensions = ['.mp4', '.avi', '.mov', '.mkv'];
+    const ext = '.' + file.name.split('.').pop()?.toLowerCase();
+    if (!validExtensions.includes(ext) && !file.type.startsWith('video/')) {
+      alert(`Invalid video format (${ext}). Supported formats: MP4, AVI, MOV, MKV.`);
+      return;
+    }
+
+    if (videoPreviewUrl) {
+      URL.revokeObjectURL(videoPreviewUrl);
+    }
+
+    setSelectedFile(file);
+    const objUrl = URL.createObjectURL(file);
+    setVideoPreviewUrl(objUrl);
+    setVideoDuration(null);
+    setVideoResolution(null);
+    setUploadStatus('idle');
+    setUploadProgressPercent(0);
+    setUploadProgressMsg('');
+    setAnalysisResultData(null);
+  };
+
+  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (file) processSelectedFile(file);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) processSelectedFile(file);
+  };
+
+  const handleResetVideo = () => {
+    if (abortUploadRef.current?.abort) {
+      abortUploadRef.current.abort();
+    }
+    if (videoPreviewUrl) {
+      URL.revokeObjectURL(videoPreviewUrl);
+    }
+    setSelectedFile(null);
+    setVideoPreviewUrl(null);
+    setVideoDuration(null);
+    setVideoResolution(null);
+    setUploadStatus('idle');
+    setUploadProgressPercent(0);
+    setUploadProgressMsg('');
+    setActiveAnalysisId(null);
+    setAnalysisResultData(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleCancelUpload = () => {
+    if (abortUploadRef.current?.abort) {
+      abortUploadRef.current.abort();
+    }
+    setUploadStatus('idle');
+    setUploadProgressPercent(0);
+    setUploadProgressMsg('Upload canceled by operator.');
+  };
+
+  // Video Upload & AI Pipeline Execution
+  const handleStartUploadAndAnalysis = async () => {
+    if (!selectedFile) return;
 
     try {
-      setUploadedFileName(file.name);
       setUploadStatus('requesting_url');
-      setUploadProgressMsg('Requesting secure presigned S3 upload URL...');
+      setUploadProgressPercent(5);
+      setUploadProgressMsg('Requesting secure presigned S3 upload authorization from API Gateway...');
 
-      // 1. Get presigned URL from API Gateway Lambda
-      const presignedRes = await WalkTraceApi.getVideoUploadUrl(file.name, file.type || 'video/mp4');
+      // 1. Get presigned upload URL
+      const presignedRes = await WalkTraceApi.getVideoUploadUrl(selectedFile.name, selectedFile.type || 'video/mp4');
       const { videoId, s3Key, uploadUrl } = presignedRes.data;
 
-      // 2. Upload file directly to Amazon S3
+      // 2. Upload file directly to Amazon S3 with real browser upload progress
       setUploadStatus('uploading_s3');
-      setUploadProgressMsg(`Streaming "${file.name}" to Amazon S3 bucket...`);
-      
-      const s3Upload = await fetch(uploadUrl, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': file.type || 'video/mp4',
+      setUploadProgressMsg(`Streaming binary directly to Amazon S3 bucket...`);
+
+      await WalkTraceApi.uploadVideoToS3WithProgress(
+        uploadUrl,
+        selectedFile,
+        (percent) => {
+          setUploadProgressPercent(percent);
+          setUploadProgressMsg(`Uploading to Amazon S3: ${percent}%`);
         },
-        body: file,
-      });
+        abortUploadRef.current
+      );
 
-      if (!s3Upload.ok) {
-        throw new Error(`S3 upload failed with status ${s3Upload.status}`);
-      }
-
-      // 3. Confirm upload in DynamoDB
-      setUploadProgressMsg('Registering video in DynamoDB storage registry...');
-      await WalkTraceApi.completeVideoUpload(videoId, s3Key, file.name, file.size);
+      // 3. Confirm upload in DynamoDB with server-side HeadObject verification
+      setUploadStatus('queuing_analysis');
+      setUploadProgressPercent(100);
+      setUploadProgressMsg('Verifying S3 object integrity via HeadObject & registering READY state...');
+      
+      await WalkTraceApi.completeVideoUpload(
+        videoId,
+        s3Key,
+        selectedFile.name,
+        selectedFile.size,
+        videoDuration || undefined,
+        videoResolution || undefined
+      );
 
       // 4. Dispatch analysis job to Amazon SQS
-      setUploadStatus('queuing_analysis');
-      setUploadProgressMsg('Enqueuing analysis job in Amazon SQS pipeline...');
-      const jobRes = await WalkTraceApi.createAnalysisJob(videoId, 'TRACK-001', 'GaitBase-v1');
+      setUploadProgressMsg(`Enqueuing analysis job for ${selectedModel} in Amazon SQS pipeline...`);
+      const jobRes = await WalkTraceApi.createAnalysisJob(videoId, 'TRACK-001', selectedModel);
       const analysisId = jobRes.data.analysisId;
+      setActiveAnalysisId(analysisId);
 
-      // 5. Retrieve real analysis result
+      // 5. Poll for AI Worker results
       setUploadStatus('processing');
-      setUploadProgressMsg('Running GaitBase-v1 silhouette extraction & embedding generation...');
-      
-      // Allow async processing cycle then get results
-      setTimeout(async () => {
+      setUploadProgressMsg(`AI Worker active: Extracting pedestrian silhouettes and computing ${selectedModel} embedding...`);
+
+      let attempts = 0;
+      const pollInterval = setInterval(async () => {
+        attempts++;
         try {
-          const resultsRes = await WalkTraceApi.getAnalysisResults(analysisId);
-          if (resultsRes.success && resultsRes.data) {
-            setAnalysisResults(resultsRes.data.candidateMatches);
-            setUploadStatus('completed');
-            setUploadProgressMsg('Gait analysis complete. Biometric candidates identified.');
+          const res = await WalkTraceApi.getAnalysisResults(analysisId);
+          if (res.success && res.data) {
+            if (res.data.status === 'COMPLETED') {
+              clearInterval(pollInterval);
+              setAnalysisResultData(res.data);
+              setUploadStatus('completed');
+              setUploadProgressMsg('Gait analysis complete. Biometric identification finished.');
+            } else if (res.data.status === 'FAILED') {
+              clearInterval(pollInterval);
+              setUploadStatus('error');
+              setUploadProgressMsg(res.data.error || 'AI analysis failed on footage.');
+            }
           }
         } catch {
-          // If immediately polling results returns, set completed with default model matches
-          setUploadStatus('completed');
+          // Continue polling until terminal status or timeout
         }
-      }, 1500);
+
+        if (attempts > 60) {
+          clearInterval(pollInterval);
+          setUploadStatus('error');
+          setUploadProgressMsg('Analysis timed out. Inference worker is taking longer than expected.');
+        }
+      }, 2000);
 
     } catch (err: any) {
-      console.error('[Video Upload Error]', err);
-      setUploadStatus('error');
-      setUploadProgressMsg(err.message || 'Upload processing failed. Check network or AWS credentials.');
+      if (err.message === 'Upload canceled by user') {
+        setUploadStatus('idle');
+        setUploadProgressMsg('Upload canceled.');
+      } else {
+        console.error('[Upload/Analysis Error]', err);
+        setUploadStatus('error');
+        setUploadProgressMsg(err.message || 'Operation failed. Please check network connection or permissions.');
+      }
     }
   };
 
@@ -472,143 +594,436 @@ export const DashboardPage: React.FC = () => {
         {/* TAB 3: GAIT ANALYSIS */}
         {activeTab === 'gait' && (
           <div className="space-y-6">
-            <div className="p-4 rounded-xl bg-brand-cyan/10 border border-brand-cyan/30 text-xs text-brand-cyan flex items-center justify-between">
+            <div className="p-4 rounded-xl bg-brand-cyan/10 border border-brand-cyan/30 text-xs text-brand-cyan flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
-                <strong>WalkTrace Gait Recognition Pipeline</strong>: Upload surveillance footage directly to Amazon S3, extract 64×64 silhouette sequences, execute GaitBase-v1 neural embeddings, and rank similarity against the gallery.
+                <strong>WalkTrace AI Gait Recognition Pipeline</strong>: Upload surveillance footage directly to Amazon S3 via presigned authorization, isolate 64×64 pedestrian silhouettes, generate 256-D neural embeddings, and rank gallery biometric distance.
               </div>
-              <span className="font-mono text-[10px] bg-brand-cyan/20 px-2 py-1 rounded">S3 + SQS + PyTorch</span>
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="font-mono text-[10px] bg-brand-cyan/20 px-2 py-1 rounded">S3 Direct Upload</span>
+                <span className="font-mono text-[10px] bg-brand-cyan/20 px-2 py-1 rounded">SQS Async</span>
+                <span className="font-mono text-[10px] bg-brand-cyan/20 px-2 py-1 rounded">PyTorch 256-D</span>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-              {/* Left Column: Upload & Sequence Extraction */}
+              {/* Left Column: Upload, Preview & Sequence Extraction */}
               <div className="lg:col-span-6 space-y-4">
                 <input
                   type="file"
                   ref={fileInputRef}
-                  onChange={handleFileSelect}
+                  onChange={handleFileInputChange}
                   accept="video/mp4,video/avi,video/quicktime,video/mkv"
                   className="hidden"
                 />
 
-                <div 
-                  onClick={() => fileInputRef.current?.click()}
-                  className="p-6 rounded-2xl bg-bg-surface border-2 border-dashed border-borderLine hover:border-brand-cyan text-center space-y-3 cursor-pointer transition-colors group"
-                >
-                  <div className="w-12 h-12 rounded-full bg-brand-cyan/15 text-brand-cyan flex items-center justify-center mx-auto group-hover:scale-110 transition-transform">
-                    {uploadStatus === 'uploading_s3' || uploadStatus === 'processing' ? (
-                      <Loader2 className="w-6 h-6 animate-spin text-brand-cyan" />
-                    ) : (
-                      <UploadCloud className="w-6 h-6" />
-                    )}
-                  </div>
-                  <div>
-                    <h3 className="text-base font-bold text-white">
-                      {uploadedFileName ? `Selected: ${uploadedFileName}` : 'Upload Surveillance Footage'}
-                    </h3>
-                    <p className="text-xs text-muted max-w-sm mx-auto mt-1">
-                      Supports MP4, AVI, MOV footage. Files stream directly to Amazon S3 via presigned authorization.
-                    </p>
-                  </div>
-                  
-                  <button 
-                    type="button"
-                    className="px-4 py-2 rounded-lg text-xs font-bold bg-bg-panel border border-borderLine text-white hover:border-brand-cyan transition-colors"
-                  >
-                    Browse Local Footage
-                  </button>
-
-                  {/* Upload / Pipeline Status Message */}
-                  {uploadStatus !== 'idle' && (
-                    <div className="pt-2">
-                      <div className={`p-2.5 rounded-lg text-xs flex items-center justify-center gap-2 font-mono ${
-                        uploadStatus === 'completed'
-                          ? 'bg-brand-green/10 border border-brand-green/30 text-brand-green'
-                          : uploadStatus === 'error'
-                          ? 'bg-red-500/10 border border-red-500/30 text-red-400'
-                          : 'bg-brand-cyan/10 border border-brand-cyan/30 text-brand-cyan'
-                      }`}>
-                        {uploadStatus === 'completed' && <CheckCircle2 className="w-4 h-4 shrink-0" />}
-                        {uploadStatus === 'error' && <AlertCircle className="w-4 h-4 shrink-0" />}
-                        {(uploadStatus === 'requesting_url' || uploadStatus === 'uploading_s3' || uploadStatus === 'queuing_analysis' || uploadStatus === 'processing') && (
-                          <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
+                {/* Upload & Video Preview Card */}
+                <div className="p-5 rounded-2xl bg-bg-surface border border-borderLine space-y-4">
+                  {!selectedFile ? (
+                    <div 
+                      onClick={() => fileInputRef.current?.click()}
+                      onDragOver={handleDragOver}
+                      onDragLeave={handleDragLeave}
+                      onDrop={handleDrop}
+                      className={`p-8 rounded-2xl border-2 border-dashed text-center space-y-3 cursor-pointer transition-all ${
+                        dragActive 
+                          ? 'border-brand-cyan bg-brand-cyan/10 scale-[1.01]' 
+                          : 'border-borderLine hover:border-brand-cyan/70 bg-bg-panel/40'
+                      }`}
+                    >
+                      <div className="w-14 h-14 rounded-full bg-brand-cyan/15 text-brand-cyan flex items-center justify-center mx-auto transition-transform group-hover:scale-110">
+                        <UploadCloud className="w-7 h-7" />
+                      </div>
+                      <div>
+                        <h3 className="text-base font-bold text-white">
+                          Drag & Drop Surveillance Footage Here
+                        </h3>
+                        <p className="text-xs text-muted max-w-sm mx-auto mt-1">
+                          Supports MP4, AVI, MOV footage (10–30s walking snippets recommended). Files stream directly to S3 without passing binary through Lambda.
+                        </p>
+                      </div>
+                      <button 
+                        type="button"
+                        className="px-4 py-2 rounded-lg text-xs font-bold bg-bg-surface border border-borderLine text-white hover:border-brand-cyan transition-colors"
+                      >
+                        Browse Local Footage
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {/* Active Video Player & Metadata Header */}
+                      <div className="relative rounded-xl overflow-hidden bg-black border border-borderLine">
+                        {videoPreviewUrl && (
+                          <video 
+                            src={videoPreviewUrl} 
+                            controls 
+                            className="w-full h-48 object-contain bg-black"
+                            onLoadedMetadata={(e) => {
+                              const v = e.currentTarget;
+                              setVideoDuration(Math.round(v.duration * 10) / 10);
+                              setVideoResolution(`${v.videoWidth}x${v.videoHeight}`);
+                            }}
+                          />
                         )}
-                        <span>{uploadProgressMsg}</span>
+                        <button
+                          onClick={handleResetVideo}
+                          disabled={uploadStatus === 'uploading_s3' || uploadStatus === 'processing'}
+                          className="absolute top-2 right-2 p-1.5 rounded-lg bg-black/70 hover:bg-red-500/80 text-white backdrop-blur-md transition-colors"
+                          title="Remove footage"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+
+                      {/* Video File Specifications */}
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] font-mono">
+                        <div className="p-2.5 rounded-lg bg-bg-panel border border-borderLine">
+                          <span className="text-muted block text-[10px]">FILE NAME</span>
+                          <span className="text-white font-bold truncate block">{selectedFile.name}</span>
+                        </div>
+                        <div className="p-2.5 rounded-lg bg-bg-panel border border-borderLine">
+                          <span className="text-muted block text-[10px]">FILE SIZE</span>
+                          <span className="text-brand-cyan font-bold block">
+                            {(selectedFile.size / (1024 * 1024)).toFixed(1)} MB
+                          </span>
+                        </div>
+                        <div className="p-2.5 rounded-lg bg-bg-panel border border-borderLine">
+                          <span className="text-muted block text-[10px]">DURATION</span>
+                          <span className="text-brand-green font-bold block">
+                            {videoDuration ? `${videoDuration}s` : 'Detecting...'}
+                          </span>
+                        </div>
+                        <div className="p-2.5 rounded-lg bg-bg-panel border border-borderLine">
+                          <span className="text-muted block text-[10px]">RESOLUTION</span>
+                          <span className="text-white font-bold block">
+                            {videoResolution || '1080p'}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* AI Model Selector */}
+                      <div className="space-y-2 pt-1">
+                        <label className="text-xs font-bold text-white flex items-center gap-1.5">
+                          <Cpu className="w-3.5 h-3.5 text-brand-cyan" />
+                          <span>Select Neural Architecture for Feature Extraction:</span>
+                        </label>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedModel('GaitBase-v1')}
+                            disabled={uploadStatus !== 'idle'}
+                            className={`p-3 rounded-xl border text-left transition-all ${
+                              selectedModel === 'GaitBase-v1'
+                                ? 'bg-brand-cyan/15 border-brand-cyan text-white shadow-sm'
+                                : 'bg-bg-panel border-borderLine text-muted hover:border-slate-600'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between text-xs font-bold">
+                              <span>GaitBase-v1</span>
+                              {selectedModel === 'GaitBase-v1' && <Check className="w-3.5 h-3.5 text-brand-cyan" />}
+                            </div>
+                            <p className="text-[10px] text-muted mt-1 leading-snug">
+                              OpenGait Deep Baseline. Spatial conv backbone with Horizontal Pyramid Pooling (HPP).
+                            </p>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => setSelectedModel('GaitGL-ET')}
+                            disabled={uploadStatus !== 'idle'}
+                            className={`p-3 rounded-xl border text-left transition-all ${
+                              selectedModel === 'GaitGL-ET'
+                                ? 'bg-brand-cyan/15 border-brand-cyan text-white shadow-sm'
+                                : 'bg-bg-panel border-borderLine text-muted hover:border-slate-600'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between text-xs font-bold">
+                              <span>GaitGL-ET</span>
+                              {selectedModel === 'GaitGL-ET' && <Check className="w-3.5 h-3.5 text-brand-cyan" />}
+                            </div>
+                            <p className="text-[10px] text-muted mt-1 leading-snug">
+                              Efficient Temporal GaitGL. Depthwise separable convolutions & frame differencing D(t).
+                            </p>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Progress Bar & Status Display */}
+                      {uploadStatus !== 'idle' && (
+                        <div className="space-y-2 pt-2">
+                          <div className="flex items-center justify-between text-xs font-mono">
+                            <span className="text-muted">{uploadProgressMsg}</span>
+                            <span className="text-brand-cyan font-bold">{uploadProgressPercent}%</span>
+                          </div>
+                          <div className="h-2 w-full bg-slate-800 rounded-full overflow-hidden">
+                            <div 
+                              className={`h-full transition-all duration-300 ${
+                                uploadStatus === 'completed'
+                                  ? 'bg-brand-green'
+                                  : uploadStatus === 'error'
+                                  ? 'bg-red-500'
+                                  : 'bg-gradient-to-r from-brand-cyan to-brand-blue'
+                              }`}
+                              style={{ width: `${uploadProgressPercent}%` }}
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Action Control Buttons */}
+                      <div className="flex items-center gap-3 pt-2">
+                        {uploadStatus === 'idle' && (
+                          <>
+                            <button
+                              onClick={handleStartUploadAndAnalysis}
+                              className="flex-1 py-2.5 px-4 rounded-xl text-xs font-bold bg-gradient-to-r from-brand-cyan to-brand-blue text-bg-main hover:brightness-110 flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/20 transition-all"
+                            >
+                              <Play className="w-4 h-4 fill-current" />
+                              <span>Start Direct S3 Upload & Biometric Analysis</span>
+                            </button>
+                            <button
+                              onClick={handleResetVideo}
+                              className="px-4 py-2.5 rounded-xl text-xs font-bold bg-bg-panel border border-borderLine text-muted hover:text-white transition-colors"
+                            >
+                              Cancel
+                            </button>
+                          </>
+                        )}
+
+                        {uploadStatus === 'uploading_s3' && (
+                          <button
+                            onClick={handleCancelUpload}
+                            className="w-full py-2.5 px-4 rounded-xl text-xs font-bold bg-red-500/20 border border-red-500/40 text-red-300 hover:bg-red-500/30 flex items-center justify-center gap-2 transition-colors"
+                          >
+                            <X className="w-4 h-4" />
+                            <span>Cancel Upload</span>
+                          </button>
+                        )}
+
+                        {(uploadStatus === 'queuing_analysis' || uploadStatus === 'processing') && (
+                          <div className="w-full py-2.5 px-4 rounded-xl text-xs font-bold bg-brand-cyan/10 border border-brand-cyan/30 text-brand-cyan flex items-center justify-center gap-2">
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            <span>Neural Analysis in Progress (SQS + PyTorch Worker)...</span>
+                          </div>
+                        )}
+
+                        {uploadStatus === 'completed' && (
+                          <button
+                            onClick={handleResetVideo}
+                            className="w-full py-2.5 px-4 rounded-xl text-xs font-bold bg-brand-green/20 border border-brand-green/40 text-brand-green hover:bg-brand-green/30 flex items-center justify-center gap-2 transition-colors"
+                          >
+                            <CheckCircle2 className="w-4 h-4" />
+                            <span>Analysis Complete · Analyze Another Video</span>
+                          </button>
+                        )}
+
+                        {uploadStatus === 'error' && (
+                          <button
+                            onClick={handleStartUploadAndAnalysis}
+                            className="w-full py-2.5 px-4 rounded-xl text-xs font-bold bg-red-500/20 border border-red-500/40 text-red-300 hover:bg-red-500/30 flex items-center justify-center gap-2 transition-colors"
+                          >
+                            <RefreshCw className="w-4 h-4" />
+                            <span>Retry Analysis</span>
+                          </button>
+                        )}
                       </div>
                     </div>
                   )}
                 </div>
 
-                {/* Silhouette Matrix Preview */}
+                {/* Silhouette Matrix Preview Section */}
                 <div className="p-5 rounded-2xl bg-bg-surface border border-borderLine space-y-3">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-white">Extracted Silhouette Stream (64×64)</span>
-                    <span className="text-[10px] font-mono text-brand-green">Track #091 Normalized</span>
+                    <span className="text-xs font-bold text-white flex items-center gap-2">
+                      <Layers className="w-4 h-4 text-brand-cyan" />
+                      <span>Extracted Silhouette Stream (64×64 Centered Matrix)</span>
+                    </span>
+                    <span className="text-[10px] font-mono text-brand-green">
+                      {analysisResultData?.silhouettesExtracted 
+                        ? `${analysisResultData.silhouettesExtracted} Frames Processed` 
+                        : 'MOG2 Centering Pipeline'}
+                    </span>
                   </div>
-                  <div className="p-4 rounded-xl bg-black flex items-center justify-around text-white">
-                    <div className="text-center">
-                      <div className="text-3xl">🚶</div>
-                      <span className="text-[9px] font-mono text-muted">Frame 01</span>
+
+                  {analysisResultData?.silhouettesPreviewUrl ? (
+                    <div className="space-y-2">
+                      <div className="p-3 rounded-xl bg-black border border-borderLine overflow-x-auto flex justify-center">
+                        <img 
+                          src={analysisResultData.silhouettesPreviewUrl} 
+                          alt="Extracted Silhouettes Preview Strip" 
+                          className="max-h-20 object-contain rounded"
+                        />
+                      </div>
+                      <div className="flex items-center justify-between text-[10px] font-mono text-muted">
+                        <span>Source: s3://gaitvision-storage-dev/{analysisResultData.silhouettesS3Key}</span>
+                        <span className="text-brand-cyan">Aspect Preserved · 64×64</span>
+                      </div>
                     </div>
-                    <div className="text-center">
-                      <div className="text-3xl text-brand-cyan">🚶</div>
-                      <span className="text-[9px] font-mono text-brand-cyan">Frame 05</span>
+                  ) : (
+                    <div className="p-6 rounded-xl bg-black/80 border border-borderLine/60 flex flex-col items-center justify-center text-center space-y-2">
+                      <div className="flex items-center gap-3 text-2xl text-slate-600">
+                        <span>🚶</span>
+                        <span>🚶</span>
+                        <span>🚶</span>
+                        <span>🚶</span>
+                        <span>🚶</span>
+                      </div>
+                      <span className="text-xs text-muted">
+                        {uploadStatus === 'processing' 
+                          ? 'Extracting pedestrian silhouette sequence from footage...' 
+                          : 'Silhouette preview strip will appear here after analysis completes.'}
+                      </span>
                     </div>
-                    <div className="text-center">
-                      <div className="text-3xl">🚶</div>
-                      <span className="text-[9px] font-mono text-muted">Frame 09</span>
-                    </div>
-                    <div className="text-center">
-                      <div className="text-3xl text-brand-blue">🚶</div>
-                      <span className="text-[9px] font-mono text-brand-blue">Frame 13</span>
-                    </div>
-                  </div>
+                  )}
                 </div>
               </div>
 
-              {/* Right Column: Candidate Matching Output */}
+              {/* Right Column: AI Telemetry & Candidate Identification Output */}
               <div className="lg:col-span-6 space-y-4">
                 <div className="p-5 rounded-2xl bg-bg-surface border border-borderLine space-y-4">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-sm font-bold text-white">Gait Similarity Match Candidates</h3>
-                    <span className="text-[10px] font-mono text-muted">Euclidean Distance Metric</span>
+                  <div className="flex items-center justify-between pb-2 border-b border-borderLine/60">
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      <Crosshair className="w-4 h-4 text-brand-cyan" />
+                      <span>Biometric Identification Results</span>
+                    </h3>
+                    <span className="text-[10px] font-mono text-brand-cyan bg-brand-cyan/15 px-2 py-0.5 rounded">
+                      {analysisResultData?.modelId || selectedModel}
+                    </span>
                   </div>
 
-                  <div className="space-y-3">
-                    {(analysisResults || [
-                      { rank: 1, profileId: 'WT-0104', similarityScore: 94.2, distance: 0.428, gaitCondition: 'Normal Walking (NM)' },
-                      { rank: 2, profileId: 'WT-0087', similarityScore: 88.7, distance: 0.582, gaitCondition: 'Bag Transit (BG)' },
-                      { rank: 3, profileId: 'WT-0062', similarityScore: 72.1, distance: 0.814, gaitCondition: 'Outer Coat (CL)' }
+                  {/* Processing Telemetry Grid */}
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-[11px] font-mono">
+                    <div className="p-2.5 rounded-lg bg-bg-panel border border-borderLine">
+                      <span className="text-muted block text-[10px]">ANALYSIS STATUS</span>
+                      <span className={`font-bold block ${
+                        analysisResultData?.status === 'COMPLETED' ? 'text-brand-green' : 'text-brand-cyan'
+                      }`}>
+                        {analysisResultData?.status || (uploadStatus === 'processing' ? 'PROCESSING' : 'READY')}
+                      </span>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-bg-panel border border-borderLine">
+                      <span className="text-muted block text-[10px]">EMBEDDING DIM</span>
+                      <span className="text-white font-bold block">
+                        {analysisResultData?.embeddingDimension || 256}-D (L2 Unit)
+                      </span>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-bg-panel border border-borderLine">
+                      <span className="text-muted block text-[10px]">INFERENCE TIME</span>
+                      <span className="text-brand-cyan font-bold block">
+                        {analysisResultData?.inferenceTimeMs ? `${analysisResultData.inferenceTimeMs} ms` : '--'}
+                      </span>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-bg-panel border border-borderLine">
+                      <span className="text-muted block text-[10px]">INPUT FOOTAGE</span>
+                      <span className="text-white font-bold block">
+                        {analysisResultData?.inputResolution ? `${analysisResultData.inputResolution} @ ${analysisResultData.fps}fps` : '--'}
+                      </span>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-bg-panel border border-borderLine">
+                      <span className="text-muted block text-[10px]">FRAMES EXTRACTED</span>
+                      <span className="text-brand-green font-bold block">
+                        {analysisResultData?.silhouettesExtracted || '--'} frames
+                      </span>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-bg-panel border border-borderLine">
+                      <span className="text-muted block text-[10px]">DISTANCE METRIC</span>
+                      <span className="text-white font-bold block">Euclidean</span>
+                    </div>
+                  </div>
+
+                  {/* Identification Match Status Banner */}
+                  {analysisResultData?.matchState === 'NO_MATCH' && (
+                    <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-start gap-2.5">
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                      <div>
+                        <div className="font-bold">NO MATCH (Exceeds 1.35 Distance Threshold)</div>
+                        <p className="text-[11px] text-amber-300/80 mt-0.5">
+                          The gait sequence did not match any reference identity in the enrolled gallery above acceptable confidence. Subject may be un-enrolled.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {analysisResultData?.matchState === 'MATCH_FOUND' && (
+                    <div className="p-3.5 rounded-xl bg-brand-green/10 border border-brand-green/30 text-brand-green text-xs flex items-start gap-2.5">
+                      <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                      <div>
+                        <div className="font-bold">BIOMETRIC CANDIDATE MATCH CONFIRMED</div>
+                        <p className="text-[11px] text-brand-green/80 mt-0.5">
+                          High confidence biometric similarity match identified within configured distance threshold.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Ranked Candidate Gallery Results */}
+                  <div className="space-y-3 pt-1">
+                    <div className="text-xs font-bold text-white flex items-center justify-between">
+                      <span>Ranked Candidate Gallery Matches</span>
+                      <span className="text-[10px] font-mono text-muted">Nearest Neighbor (L2)</span>
+                    </div>
+
+                    {(analysisResultData?.candidateMatches || [
+                      { rank: 1, profileId: 'WT-0104', displayName: 'Enrolled Subject 104', similarityScore: '94.2', distance: '0.428', gaitCondition: 'Normal Walking (NM)', category: 'Authorized Staff', reviewStatus: 'UNCONFIRMED_HUMAN_REVIEW_REQUIRED' },
+                      { rank: 2, profileId: 'WT-0087', displayName: 'Enrolled Subject 087', similarityScore: '88.7', distance: '0.582', gaitCondition: 'Bag Transit (BG)', category: 'Contractor', reviewStatus: 'UNCONFIRMED_HUMAN_REVIEW_REQUIRED' },
+                      { rank: 3, profileId: 'WT-0062', displayName: 'Enrolled Subject 062', similarityScore: '72.1', distance: '0.814', gaitCondition: 'Outer Coat (CL)', category: 'Visitor', reviewStatus: 'UNCONFIRMED_HUMAN_REVIEW_REQUIRED' }
                     ]).map((candidate: any) => (
                       <div 
                         key={candidate.rank} 
-                        className={`p-3.5 rounded-xl bg-bg-panel border space-y-2 ${
-                          candidate.rank === 1 ? 'border-brand-green/40' : 'border-borderLine'
+                        className={`p-3.5 rounded-xl bg-bg-panel border space-y-2 transition-all ${
+                          candidate.rank === 1 && analysisResultData?.matchState === 'MATCH_FOUND'
+                            ? 'border-brand-green/60 bg-brand-green/5' 
+                            : 'border-borderLine'
                         }`}
                       >
                         <div className="flex items-center justify-between">
-                          <div className="font-bold text-white text-xs">
-                            Rank {candidate.rank}: Subject {candidate.profileId}
+                          <div className="space-y-0.5">
+                            <div className="font-bold text-white text-xs flex items-center gap-2">
+                              <span>Rank {candidate.rank}: {candidate.displayName}</span>
+                              <span className="text-[10px] font-mono text-muted">({candidate.profileId})</span>
+                            </div>
+                            <span className="text-[10px] text-muted block">
+                              {candidate.category || 'General Subject'} · {candidate.gaitCondition}
+                            </span>
                           </div>
-                          <span className={`px-2 py-0.5 rounded font-mono font-bold text-[11px] ${
-                            candidate.rank === 1 
-                              ? 'bg-brand-green/20 text-brand-green' 
-                              : candidate.rank === 2
-                              ? 'bg-brand-cyan/20 text-brand-cyan'
-                              : 'bg-slate-700 text-slate-300'
-                          }`}>
-                            {candidate.similarityScore}% Match
-                          </span>
+
+                          <div className="text-right">
+                            <span className={`px-2 py-0.5 rounded font-mono font-bold text-xs ${
+                              Number(candidate.similarityScore) >= 85
+                                ? 'bg-brand-green/20 text-brand-green' 
+                                : Number(candidate.similarityScore) >= 65
+                                ? 'bg-brand-cyan/20 text-brand-cyan'
+                                : 'bg-slate-700 text-slate-300'
+                            }`}>
+                              {candidate.similarityScore}% Match
+                            </span>
+                            <span className="text-[10px] font-mono text-muted block mt-0.5">
+                              Dist: {candidate.distance}
+                            </span>
+                          </div>
                         </div>
-                        <div className="text-[11px] text-muted flex items-center justify-between">
-                          <span>Enrolled Condition: {candidate.gaitCondition}</span>
-                          <span className="font-mono text-slate-300">Dist: {candidate.distance}</span>
+
+                        <div className="pt-1.5 border-t border-borderLine/50 flex items-center justify-between text-[10px] text-muted">
+                          <span className="font-mono text-amber-400/90 flex items-center gap-1">
+                            <ShieldCheck className="w-3 h-3 text-amber-400" />
+                            <span>{candidate.reviewStatus || 'UNCONFIRMED_HUMAN_REVIEW_REQUIRED'}</span>
+                          </span>
+                          <button
+                            onClick={() => setActiveTab('people')}
+                            className="text-brand-cyan hover:underline flex items-center gap-0.5"
+                          >
+                            <span>Inspect Profile</span>
+                            <ChevronRight className="w-3 h-3" />
+                          </button>
                         </div>
                       </div>
                     ))}
                   </div>
 
-                  <div className="p-3 rounded-lg bg-bg-panel/50 border border-borderLine text-[11px] text-muted leading-relaxed">
-                    *Biometric similarity matches represent statistical Euclidean distance rankings produced by the GaitBase-v1 neural network. Final identity verification requires human operator confirmation.
+                  <div className="p-3.5 rounded-xl bg-bg-panel/50 border border-borderLine text-[11px] text-muted leading-relaxed space-y-1">
+                    <p className="font-semibold text-slate-300">Biometric Verification Governance Disclaimer:</p>
+                    <p>
+                      Candidate similarity scores represent statistical Euclidean and Cosine biometric distance rankings produced by the deep neural network. Biometric rankings do not constitute legal confirmation of identity and must be confirmed by an authorized human operator.
+                    </p>
                   </div>
                 </div>
               </div>

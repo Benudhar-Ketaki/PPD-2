@@ -44,7 +44,11 @@ exports.createProfile = async (event) => {
     displayName: body.displayName || `Subject ${profileId}`,
     category: body.category || 'General Staff',
     sequences: body.sequences || 6,
-    status: 'Active',
+    status: body.status || 'Active',
+    enrollmentStatus: body.gaitVector ? 'ENROLLED' : (body.enrollmentStatus || 'ENROLLED'),
+    gaitVector: body.gaitVector || null,
+    modelId: body.modelId || 'GaitBase-v1',
+    walkingCondition: body.walkingCondition || 'Normal Walking (NM)',
     enrolledDate: now.split('T')[0],
     enrolledBy: user.email,
   };
